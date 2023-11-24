@@ -3587,7 +3587,7 @@ require('./src/serpapi').registerEndpoints(app, jsonParser);
 
 const tavernUrl = new URL(
     (cliArguments.ssl ? 'https://' : 'http://') +
-    (listen ? '0.0.0.0' : '127.0.0.1') +
+    (listen ? typeof listen === "string" ? listen : '0.0.0.0' : '127.0.0.1') +
     (':' + server_port)
 );
 

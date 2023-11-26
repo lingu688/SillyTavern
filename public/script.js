@@ -285,6 +285,7 @@ window["SillyTavern"] = {};
 
 // Event source init
 export const event_types = {
+    APP_READY: 'app_ready',
     EXTRAS_CONNECTED: 'extras_connected',
     MESSAGE_SWIPED: 'message_swiped',
     MESSAGE_SENT: 'message_sent',
@@ -744,6 +745,7 @@ async function firstLoadInit() {
     initCfg();
     doDailyExtensionUpdatesCheck();
     hideLoader();
+    await eventSource.emit(event_types.APP_READY);
 }
 
 function cancelStatusCheck() {
@@ -2009,7 +2011,8 @@ function substituteParams(content, _name1, _name2, _original, _group, _replaceCh
     if (typeof _original === 'string') {
         content = content.replace(/{{original}}/i, _original);
     }
-
+    content = diceRollReplace(content);
+    content = randomReplace(content);
     content = replaceVariableMacros(content);
     content = content.replace(/{{newline}}/gi, "\n");
     content = content.replace(/{{input}}/gi, String($('#send_textarea').val()));
@@ -2055,8 +2058,6 @@ function substituteParams(content, _name1, _name2, _original, _group, _replaceCh
         const utcTime = moment().utc().utcOffset(utcOffset).format('LT');
         return utcTime;
     });
-    content = randomReplace(content);
-    content = diceRollReplace(content);
     content = bannedWordsReplace(content);
     return content;
 }
@@ -2121,21 +2122,34 @@ function getTimeSinceLastMessage() {
 }
 
 function randomReplace(input, emptyListPlaceholder = '') {
-    const randomPattern = /{{random[ : ]([^}]+)}}/gi;
+    const randomPatternNew = /{{random\s?::\s?([^}]+)}}/gi;
+    const randomPatternOld = /{{random\s?:\s?([^}]+)}}/gi;
 
-    return input.replace(randomPattern, (match, listString) => {
-        const list = listString.split(',').map(item => item.trim()).filter(item => item.length > 0);
-
-        if (list.length === 0) {
-            return emptyListPlaceholder;
-        }
-
-        var rng = new Math.seedrandom('added entropy.', { entropy: true });
-        const randomIndex = Math.floor(rng() * list.length);
-
-        //const randomIndex = Math.floor(Math.random() * list.length);
-        return list[randomIndex];
-    });
+    if (randomPatternNew.test(input)) {
+        return input.replace(randomPatternNew, (match, listString) => {
+            //split on double colons instead of commas to allow for commas inside random items
+            const list = listString.split('::').filter(item => item.length > 0);
+            if (list.length === 0) {
+                return emptyListPlaceholder;
+            }
+            var rng = new Math.seedrandom('added entropy.', { entropy: true });
+            const randomIndex = Math.floor(rng() * list.length);
+            //trim() at the end to allow for empty random values
+            return list[randomIndex].trim();
+        });
+    } else if (randomPatternOld.test(input)) {
+        return input.replace(randomPatternOld, (match, listString) => {
+            const list = listString.split(',').map(item => item.trim()).filter(item => item.length > 0);
+            if (list.length === 0) {
+                return emptyListPlaceholder;
+            }
+            var rng = new Math.seedrandom('added entropy.', { entropy: true });
+            const randomIndex = Math.floor(rng() * list.length);
+            return list[randomIndex];
+        });
+    } else {
+        return input
+    }
 }
 
 function diceRollReplace(input, invalidRollPlaceholder = '') {
@@ -2242,15 +2256,25 @@ async function processCommands(message, type, dryRun) {
         return null;
     }
 
+    const previousText = String($("#send_textarea").val());
     const result = await executeSlashCommands(message);
-    $("#send_textarea").val(result.newText).trigger('input');
+
+    if (!result || typeof result !== 'object') {
+        return null;
+    }
+
+    const currentText = String($("#send_textarea").val());
+
+    if (previousText === currentText) {
+        $("#send_textarea").val(result.newText).trigger('input');
+    }
 
     // interrupt generation if the input was nothing but a command
-    if (message.length > 0 && result.newText.length === 0) {
+    if (message.length > 0 && result?.newText.length === 0) {
         return true;
     }
 
-    return result.interrupt;
+    return result?.interrupt;
 }
 
 function sendSystemMessage(type, text, extra = {}) {
@@ -2702,7 +2726,7 @@ class StreamingProcessor {
  * Generates a message using the provided prompt.
  * @param {string} prompt Prompt to generate a message from
  * @param {string} api API to use. Main API is used if not specified.
- * @param {string} instructOverride If 0, false or off, disables instruct formatting
+ * @param {boolean} instructOverride true to override instruct mode, false to use the default value
  * @returns {Promise<string>} Generated message
  */
 export async function generateRaw(prompt, api, instructOverride) {
@@ -2711,8 +2735,7 @@ export async function generateRaw(prompt, api, instructOverride) {
     }
 
     const abortController = new AbortController();
-    const instructDisabled = instructOverride === '0' || instructOverride === 'false' || instructOverride === 'off';
-    const isInstruct = power_user.instruct.enabled && main_api !== 'openai' && main_api !== 'novel' && !instructDisabled;
+    const isInstruct = power_user.instruct.enabled && main_api !== 'openai' && main_api !== 'novel' && !instructOverride;
 
     prompt = substituteParams(prompt);
     prompt = api == 'novel' ? adjustNovelInstructionPrompt(prompt) : prompt;
@@ -2799,7 +2822,7 @@ async function Generate(type, { automatic_trigger, force_name2, resolve, reject,
     const interruptedByCommand = await processCommands($("#send_textarea").val(), type, dryRun);
 
     if (interruptedByCommand) {
-        $("#send_textarea").val('').trigger('input');
+        //$("#send_textarea").val('').trigger('input');
         unblockGeneration();
         return;
     }

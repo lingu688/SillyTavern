@@ -26,16 +26,18 @@ import {
     setCharacterName,
     generateRaw,
     callPopup,
+    deactivateSendButtons,
+    activateSendButtons,
 } from "../script.js";
 import { getMessageTimeStamp } from "./RossAscends-mods.js";
 import { findGroupMemberId, groups, is_group_generating, resetSelectedGroup, saveGroupChat, selected_group } from "./group-chats.js";
 import { getRegexedString, regex_placement } from "./extensions/regex/engine.js";
-import { addEphemeralStoppingString, chat_styles, power_user } from "./power-user.js";
+import { addEphemeralStoppingString, chat_styles, flushEphemeralStoppingStrings, power_user } from "./power-user.js";
 import { autoSelectPersona } from "./personas.js";
 import { getContext } from "./extensions.js";
 import { hideChatMessage, unhideChatMessage } from "./chats.js";
-import { delay, stringToRange } from "./utils.js";
-import { registerVariableCommands } from "./variables.js";
+import { delay, isFalseBoolean, isTrueBoolean, stringToRange } from "./utils.js";
+import { registerVariableCommands, resolveVariable } from "./variables.js";
 export {
     executeSlashCommands,
     registerSlashCommand,
@@ -161,22 +163,91 @@ parser.addCommand('memberdown', moveGroupMemberDownCallback, ['downmember'], '<s
 parser.addCommand('peek', peekCallback, [], '<span class="monospace">(message index or range)</span> – shows a group member character card without switching chats', true, true);
 parser.addCommand('delswipe', deleteSwipeCallback, ['swipedel'], '<span class="monospace">(optional 1-based id)</span> – deletes a swipe from the last chat message. If swipe id not provided - deletes the current swipe.', true, true);
 parser.addCommand('echo', echoCallback, [], '<span class="monospace">(text)</span> – echoes the text to toast message. Useful for pipes debugging.', true, true);
-parser.addCommand('gen', generateCallback, [], '<span class="monospace">(prompt)</span> – generates text using the provided prompt and passes it to the next command through the pipe.', true, true);
-parser.addCommand('genraw', generateRawCallback, [], '<span class="monospace">(prompt)</span> – generates text using the provided prompt and passes it to the next command through the pipe. Does not include chat history or character card. Use instruct=off to skip instruct formatting, e.g. <tt>/genraw instruct=off Why is the sky blue?</tt>. Use stop=... with a JSON-serialized array to add one-time custom stop strings, e.g. <tt>/genraw stop=["\\n"] Say hi</tt>', true, true);
+parser.addCommand('gen', generateCallback, [], '<span class="monospace">(lock=on/off [prompt])</span> – generates text using the provided prompt and passes it to the next command through the pipe, optionally locking user input while generating.', true, true);
+parser.addCommand('genraw', generateRawCallback, [], '<span class="monospace">(lock=on/off [prompt])</span> – generates text using the provided prompt and passes it to the next command through the pipe, optionally locking user input while generating. Does not include chat history or character card. Use instruct=off to skip instruct formatting, e.g. <tt>/genraw instruct=off Why is the sky blue?</tt>. Use stop=... with a JSON-serialized array to add one-time custom stop strings, e.g. <tt>/genraw stop=["\\n"] Say hi</tt>', true, true);
 parser.addCommand('addswipe', addSwipeCallback, ['swipeadd'], '<span class="monospace">(text)</span> – adds a swipe to the last chat message.', true, true);
 parser.addCommand('abort', abortCallback, [], ' – aborts the slash command batch execution', true, true);
 parser.addCommand('fuzzy', fuzzyCallback, [], 'list=["a","b","c"] (search value) – performs a fuzzy match of the provided search using the provided list of value and passes the closest match to the next command through the pipe.', true, true);
 parser.addCommand('pass', (_, arg) => arg, [], '<span class="monospace">(text)</span> – passes the text to the next command through the pipe.', true, true);
 parser.addCommand('delay', delayCallback, ['wait', 'sleep'], '<span class="monospace">(milliseconds)</span> – delays the next command in the pipe by the specified number of milliseconds.', true, true);
 parser.addCommand('input', inputCallback, ['prompt'], '<span class="monospace">(prompt)</span> – shows a popup with the provided prompt and passes the user input to the next command through the pipe.', true, true);
+parser.addCommand('run', runCallback, ['call', 'exec'], '<span class="monospace">(QR label)</span> – runs a Quick Reply with the specified name from the current preset.', true, true);
+parser.addCommand('messages', getMessagesCallback, ['message'], '<span class="monospace">(names=off/on [message index or range])</span> – returns the specified message or range of messages as a string.', true, true);
+parser.addCommand('setinput', setInputCallback, [], '<span class="monospace">(text)</span> – sets the user input to the specified text and passes it to the next command through the pipe.', true, true);
+parser.addCommand('popup', popupCallback, [], '<span class="monospace">(text)</span> – shows a blocking popup with the specified text.', true, true);
 registerVariableCommands();
 
 const NARRATOR_NAME_KEY = 'narrator_name';
 const NARRATOR_NAME_DEFAULT = 'System';
 export const COMMENT_NAME_DEFAULT = 'Note';
 
+function setInputCallback(_, value) {
+    $('#send_textarea').val(value || '').trigger('input');
+    return value;
+}
+
+async function popupCallback(_, value) {
+    const safeValue = DOMPurify.sanitize(value || '');
+    await delay(1);
+    await callPopup(safeValue, 'text');
+    await delay(1);
+    return value;
+}
+
+function getMessagesCallback(args, value) {
+    const includeNames = !isFalseBoolean(args?.names);
+    const range = stringToRange(value, 0, chat.length - 1);
+
+    if (!range) {
+        console.warn(`WARN: Invalid range provided for /getmessages command: ${value}`);
+        return '';
+    }
+
+    const messages = [];
+
+    for (let messageId = range.start; messageId <= range.end; messageId++) {
+        const message = chat[messageId];
+        if (!message) {
+            console.warn(`WARN: No message found with ID ${messageId}`);
+            continue;
+        }
+
+        if (message.is_system) {
+            continue;
+        }
+
+        if (includeNames) {
+            messages.push(`${message.name}: ${message.mes}`);
+        } else {
+            messages.push(message.mes);
+        }
+    }
+
+    return messages.join('\n\n');
+}
+
+async function runCallback(_, name) {
+    if (!name) {
+        toastr.warning('No name provided for /run command');
+        return '';
+    }
+
+    if (typeof window['executeQuickReplyByName'] !== 'function') {
+        toastr.warning('Quick Reply extension is not loaded');
+        return '';
+    }
+
+    try {
+        name = name.trim();
+        return await window['executeQuickReplyByName'](name);
+    } catch (error) {
+        toastr.error(`Error running Quick Reply "${name}": ${error.message}`, 'Error');
+        return '';
+    }
+}
+
 function abortCallback() {
-    $('#send_textarea').val('');
+    $('#send_textarea').val('').trigger('input');
     throw new Error('/abort command executed');
 }
 
@@ -197,7 +268,8 @@ async function delayCallback(_, amount) {
 async function inputCallback(_, prompt) {
     // Do not remove this delay, otherwise the prompt will not show up
     await delay(1);
-    const result = await callPopup(prompt || '', 'input');
+    const safeValue = DOMPurify.sanitize(prompt || '');
+    const result = await callPopup(safeValue, 'input');
     await delay(1);
     return result || '';
 }
@@ -214,7 +286,7 @@ function fuzzyCallback(args, value) {
     }
 
     try {
-        const list = JSON.parse(args.list);
+        const list = JSON.parse(resolveVariable(args.list));
         if (!Array.isArray(list)) {
             console.warn('WARN: Invalid list argument provided for /fuzzy command');
             return '';
@@ -234,18 +306,10 @@ function fuzzyCallback(args, value) {
     }
 }
 
-async function generateRawCallback(args, value) {
-    if (!value) {
-        console.warn('WARN: No argument provided for /genraw command');
-        return;
-    }
-
-    // Prevent generate recursion
-    $('#send_textarea').val('');
-
-    if (typeof args.stop === 'string' && args.stop.length) {
+function setEphemeralStopStrings(value) {
+    if (typeof value === 'string' && value.length) {
         try {
-            const stopStrings = JSON.parse(args.stop);
+            const stopStrings = JSON.parse(value);
             if (Array.isArray(stopStrings)) {
                 for (const stopString of stopStrings) {
                     addEphemeralStoppingString(stopString);
@@ -255,22 +319,58 @@ async function generateRawCallback(args, value) {
             // Do nothing
         }
     }
-
-    const result = await generateRaw(value, '', args.instruct);
-    return result;
 }
 
-async function generateCallback(_, arg) {
-    if (!arg) {
+async function generateRawCallback(args, value) {
+    if (!value) {
+        console.warn('WARN: No argument provided for /genraw command');
+        return;
+    }
+
+    // Prevent generate recursion
+    $('#send_textarea').val('').trigger('input');
+    const lock = isTrueBoolean(args?.lock);
+
+    try {
+        if (lock) {
+            deactivateSendButtons();
+        }
+
+        setEphemeralStopStrings(resolveVariable(args?.stop));
+        const result = await generateRaw(value, '', isFalseBoolean(args?.instruct));
+        return result;
+    } finally {
+        if (lock) {
+            activateSendButtons();
+        }
+        flushEphemeralStoppingStrings();
+    }
+}
+
+async function generateCallback(args, value) {
+    if (!value) {
         console.warn('WARN: No argument provided for /gen command');
         return;
     }
 
     // Prevent generate recursion
-    $('#send_textarea').val('');
+    $('#send_textarea').val('').trigger('input');
+    const lock = isTrueBoolean(args?.lock);
 
-    const result = await generateQuietPrompt(arg, false, false, '');
-    return result;
+    try {
+        if (lock) {
+            deactivateSendButtons();
+        }
+
+        setEphemeralStopStrings(resolveVariable(args?.stop));
+        const result = await generateQuietPrompt(value, false, false, '');
+        return result;
+    } finally {
+        if (lock) {
+            activateSendButtons();
+        }
+        flushEphemeralStoppingStrings();
+    }
 }
 
 async function echoCallback(_, arg) {
@@ -370,7 +470,7 @@ async function deleteSwipeCallback(_, arg) {
 
 async function askCharacter(_, text) {
     // Prevent generate recursion
-    $('#send_textarea').val('');
+    $('#send_textarea').val('').trigger('input');
 
     // Not supported in group chats
     // TODO: Maybe support group chats?
@@ -659,7 +759,7 @@ async function triggerGroupMessageCallback(_, arg) {
     }
 
     // Prevent generate recursion
-    $('#send_textarea').val('');
+    $('#send_textarea').val('').trigger('input');
 
     const chid = findGroupMemberId(arg);
 
@@ -759,12 +859,12 @@ function openChat(id) {
 
 function continueChatCallback() {
     // Prevent infinite recursion
-    $('#send_textarea').val('');
+    $('#send_textarea').val('').trigger('input');
     $('#option_continue').trigger('click', { fromSlashCommand: true });
 }
 
 export async function generateSystemMessage(_, prompt) {
-    $('#send_textarea').val('');
+    $('#send_textarea').val('').trigger('input');
 
     if (!prompt) {
         console.warn('WARN: No prompt provided for /sysgen command');
@@ -1110,13 +1210,15 @@ async function executeSlashCommands(text, unescape = false) {
         let unnamedArg = result.value || pipeResult;
 
         if (typeof result.args === 'object') {
-            for (const [key, value] of Object.entries(result.args)) {
+            for (let [key, value] of Object.entries(result.args)) {
                 if (typeof value === 'string') {
+                    value = substituteParams(value.trim());
+
                     if (/{{pipe}}/i.test(value)) {
-                        result.args[key] = value.replace(/{{pipe}}/i, pipeResult || '');
+                        value = value.replace(/{{pipe}}/i, pipeResult || '');
                     }
 
-                    result.args[key] = substituteParams(value.trim());
+                    result.args[key] = value;
                 }
             }
         }

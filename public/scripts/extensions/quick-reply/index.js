@@ -154,6 +154,21 @@ async function onQuickReplyCtxButtonClick(id) {
 
     $('#quickReply_autoExecute_userMessage').prop('checked', qr.autoExecute_userMessage ?? false);
     $('#quickReply_autoExecute_botMessage').prop('checked', qr.autoExecute_botMessage ?? false);
+    $('#quickReply_autoExecute_chatLoad').prop('checked', qr.autoExecute_chatLoad ?? false);
+    $('#quickReply_autoExecute_appStartup').prop('checked', qr.autoExecute_appStartup ?? false);
+    $('#quickReply_hidden').prop('checked', qr.hidden ?? false);
+
+    $('#quickReply_hidden').on('input', () => {
+        const state = !!$('#quickReply_hidden').prop('checked');
+        qr.hidden = state;
+        saveSettingsDebounced();
+    });
+
+    $('#quickReply_autoExecute_appStartup').on('input', () => {
+        const state = !!$('#quickReply_autoExecute_appStartup').prop('checked');
+        qr.autoExecute_appStartup = state;
+        saveSettingsDebounced();
+    });
 
     $('#quickReply_autoExecute_userMessage').on('input', () => {
         const state = !!$('#quickReply_autoExecute_userMessage').prop('checked');
@@ -164,6 +179,12 @@ async function onQuickReplyCtxButtonClick(id) {
     $('#quickReply_autoExecute_botMessage').on('input', () => {
         const state = !!$('#quickReply_autoExecute_botMessage').prop('checked');
         qr.autoExecute_botMessage = state;
+        saveSettingsDebounced();
+    });
+
+    $('#quickReply_autoExecute_chatLoad').on('input', () => {
+        const state = !!$('#quickReply_autoExecute_chatLoad').prop('checked');
+        qr.autoExecute_chatLoad = state;
         saveSettingsDebounced();
     });
 
@@ -207,8 +228,25 @@ async function onAutoInputInject() {
 
 async function sendQuickReply(index) {
     const prompt = extension_settings.quickReply.quickReplySlots[index]?.mes || '';
-    await performQuickReply(prompt, index);
+    return await performQuickReply(prompt, index);
 }
+
+async function executeQuickReplyByName(name) {
+    if (!extension_settings.quickReply.quickReplyEnabled) {
+        throw new Error('Quick Reply is disabled');
+    }
+
+    const qr = extension_settings.quickReply.quickReplySlots.find(x => x.label == name);
+
+    if (!qr) {
+        throw new Error(`Quick Reply "${name}" not found`);
+    }
+
+    return await performQuickReply(qr.mes);
+}
+
+window['executeQuickReplyByName'] = executeQuickReplyByName;
+
 async function performQuickReply(prompt, index) {
     if (!prompt) {
         console.warn(`Quick reply slot ${index} is empty! Aborting.`);
@@ -231,8 +269,8 @@ async function performQuickReply(prompt, index) {
 
     // the prompt starts with '/' - execute slash commands natively
     if (prompt.startsWith('/')) {
-        await executeSlashCommands(newText);
-        return;
+        const result = await executeSlashCommands(newText);
+        return result?.pipe;
     }
 
     newText = substituteParams(newText);
@@ -289,13 +327,15 @@ function addQuickReplyBar() {
     let quickReplyButtonHtml = '';
 
     for (let i = 0; i < extension_settings.quickReply.numberOfSlots; i++) {
-        let quickReplyMes = extension_settings.quickReply.quickReplySlots[i]?.mes || '';
-        let quickReplyLabel = extension_settings.quickReply.quickReplySlots[i]?.label || '';
+        const qr = extension_settings.quickReply.quickReplySlots[i];
+        const quickReplyMes = qr?.mes || '';
+        const quickReplyLabel = qr?.label || '';
+        const hidden = qr?.hidden ?? false;
         let expander = '';
         if (extension_settings.quickReply.quickReplySlots[i]?.contextMenu?.length) {
             expander = '<span class="ctx-expander" title="Open context menu">⋮</span>';
         }
-        quickReplyButtonHtml += `<div title="${quickReplyMes}" class="quickReplyButton" data-index="${i}" id="quickReply${i + 1}">${quickReplyLabel}${expander}</div>`;
+        quickReplyButtonHtml += `<div title="${quickReplyMes}" class="quickReplyButton ${hidden ? 'displayNone' : ''}" data-index="${i}" id="quickReply${i + 1}">${quickReplyLabel}${expander}</div>`;
     }
 
     const quickReplyBarFullHtml = `
@@ -560,7 +600,14 @@ function saveQROrder() {
     });
 }
 
+/**
+ * Executes quick replies on message received.
+ * @param {number} index New message index
+ * @returns {Promise<void>}
+ */
 async function onMessageReceived(index) {
+    if (!extension_settings.quickReply.quickReplyEnabled) return;
+
     for (let i = 0; i < extension_settings.quickReply.numberOfSlots; i++) {
         const qr = extension_settings.quickReply.quickReplySlots[i];
         if (qr?.autoExecute_botMessage) {
@@ -572,7 +619,14 @@ async function onMessageReceived(index) {
     }
 }
 
+/**
+ * Executes quick replies on message sent.
+ * @param {number} index New message index
+ * @returns {Promise<void>}
+ */
 async function onMessageSent(index) {
+    if (!extension_settings.quickReply.quickReplyEnabled) return;
+
     for (let i = 0; i < extension_settings.quickReply.numberOfSlots; i++) {
         const qr = extension_settings.quickReply.quickReplySlots[i];
         if (qr?.autoExecute_userMessage) {
@@ -580,6 +634,37 @@ async function onMessageSent(index) {
             if (message?.mes && message?.mes !== '...') {
                 await sendQuickReply(i);
             }
+        }
+    }
+}
+
+/**
+ * Executes quick replies on chat changed.
+ * @param {string} chatId New chat id
+ * @returns {Promise<void>}
+ */
+async function onChatChanged(chatId) {
+    if (!extension_settings.quickReply.quickReplyEnabled) return;
+
+    for (let i = 0; i < extension_settings.quickReply.numberOfSlots; i++) {
+        const qr = extension_settings.quickReply.quickReplySlots[i];
+        if (qr?.autoExecute_chatLoad && chatId) {
+            await sendQuickReply(i);
+        }
+    }
+}
+
+/**
+ * Executes quick replies on app ready.
+ * @returns {Promise<void>}
+ */
+async function onAppReady() {
+    if (!extension_settings.quickReply.quickReplyEnabled) return;
+
+    for (let i = 0; i < extension_settings.quickReply.numberOfSlots; i++) {
+        const qr = extension_settings.quickReply.quickReplySlots[i];
+        if (qr?.autoExecute_appStartup) {
+            await sendQuickReply(i);
         }
     }
 }
@@ -667,6 +752,8 @@ jQuery(async () => {
 
     eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
     eventSource.on(event_types.MESSAGE_SENT, onMessageSent);
+    eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
+    eventSource.on(event_types.APP_READY, onAppReady);
 });
 
 jQuery(() => {
